@@ -1,17 +1,26 @@
-"""Collision probability via Mahalanobis distance approximation."""
+"""Collision probability via a simple Gaussian miss-distance model."""
 from __future__ import annotations
 
-import numpy as np
+import math
 
 
-def mahalanobis_distance(relative_position_km: np.ndarray, covariance_km2: np.ndarray) -> float:
-    r = np.asarray(relative_position_km).reshape(3, 1)
-    p_inv = np.linalg.pinv(covariance_km2)
-    d2 = float((r.T @ p_inv @ r)[0, 0])
-    return float(np.sqrt(max(d2, 0.0)))
+def collision_probability(closest_approach_km: float, sigma_m: float = 100.0) -> float:
+    """Compute collision probability from scalar miss distance with strict unit handling.
 
+    Orbital propagation distances are in kilometers.
+    Probability math is performed in meters.
+    """
+    closest_approach_km = float(closest_approach_km)
+    miss_distance_m = closest_approach_km * 1000.0
+    sigma = float(sigma_m)
 
-def collision_probability(relative_position_km: np.ndarray, covariance_km2: np.ndarray) -> float:
-    """Gaussian encounter proxy: Pc = exp(-0.5 * D^2)."""
-    d = mahalanobis_distance(relative_position_km, covariance_km2)
-    return float(np.exp(-0.5 * d**2))
+    if closest_approach_km > 1.0:
+        pc = 0.0
+    else:
+        pc = float(math.exp(-(miss_distance_m**2) / (2.0 * sigma**2)))
+
+    print(f"[DEBUG] closest_approach_km={closest_approach_km}")
+    print(f"[DEBUG] miss_distance_m={miss_distance_m}")
+    print(f"[DEBUG] sigma={sigma}")
+    print(f"[DEBUG] collision_probability={pc}")
+    return pc
