@@ -1,0 +1,6 @@
+numpy
+requests
+sgp4
+matplotlib
+pyserial
+lightgbm
