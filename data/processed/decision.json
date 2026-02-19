@@ -1,0 +1,35 @@
+{
+  "satellite_tle_path": "C:\\Users\\USER\\Documents\\GitHub\\leo_autonomus-planner\\data\\satellite\\satellite_tles.json",
+  "debris_tle_path": "C:\\Users\\USER\\Documents\\GitHub\\leo_autonomus-planner\\data\\debris\\debris_tles.json",
+  "debris_count": 100,
+  "protected_satellite_norad_id": "58435",
+  "first_debris_norad_id": "19137",
+  "window_hours": 72,
+  "timestep_seconds": 60,
+  "collision_probability": 0.8389343258628859,
+  "closest_approach_km": 325.5793358770786,
+  "highest_risk_debris_norad_id": "35290",
+  "highest_risk_tca_utc": "2026-02-21T08:58:20.862609+00:00",
+  "pinn_physics_mse": 0.0989052157190545,
+  "covariance_diagonal_km2": [
+    78083.11180652857,
+    56167.443016449,
+    399336.0252015365
+  ],
+  "decision": true,
+  "decision_confidence": 0.8389343258628859,
+  "outputs": {
+    "propagated_states_csv": "C:\\Users\\USER\\Documents\\GitHub\\leo_autonomus-planner\\data\\processed\\propagated_states.csv",
+    "conjunction_results_csv": "C:\\Users\\USER\\Documents\\GitHub\\leo_autonomus-planner\\data\\processed\\conjunction_results.csv",
+    "decision_json": "C:\\Users\\USER\\Documents\\GitHub\\leo_autonomus-planner\\data\\processed\\decision.json"
+  },
+  "thrust_command": {
+    "thrust_vector": [
+      0.0,
+      0.000553408257416584,
+      0.0
+    ],
+    "duration_ms": 1106,
+    "burn_type": "tangential"
+  }
+}
