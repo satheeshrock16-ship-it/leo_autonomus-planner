@@ -21,6 +21,7 @@ from config import (
 )
 from pipeline import collision_check, fetch_data, replan
 from pipeline.propulsion_interface import ThrustCommand
+from visualization.interactive_plot import plot_interactive_3d
 from visualization.plot_avoidance import plot_avoidance_3d
 from visualization.plot_orbit import plot_orbits
 
@@ -314,6 +315,8 @@ def run_autonomous_cycle(fetch_live_data: bool = False) -> dict[str, Any]:
         },
     }
 
+    interactive_avoidance_xyz = None
+    interactive_return_xyz = None
     if pc > COLLISION_PROBABILITY_THRESHOLD and decision.should_burn:
         plan = replan.run(current_radius_km=6878.0, nominal_radius_km=6878.0)
         cmd = ThrustCommand(
@@ -326,9 +329,39 @@ def run_autonomous_cycle(fetch_live_data: bool = False) -> dict[str, Any]:
             "duration_ms": cmd.duration_ms,
             "burn_type": cmd.burn_type,
         }
+
+        if protected_orbit.ndim == 2 and protected_orbit.shape[0] > 0 and sat_tca is not None:
+            tca_idx = int(np.argmin(np.linalg.norm(protected_orbit - sat_tca.reshape(1, 3), axis=1)))
+            base_leg = protected_orbit[tca_idx:]
+            if base_leg.size > 0:
+                viz_scale = 1800.0
+                interactive_avoidance_xyz = base_leg + (np.asarray(plan["thrust_vector"], dtype=float) * viz_scale)
+                interactive_return_xyz = interactive_avoidance_xyz + np.array(
+                    [0.0, -float(plan["return_delta_v_km_s"]) * viz_scale, 0.0],
+                    dtype=float,
+                )
+
         plot_avoidance_3d(rel_pos, plan["thrust_vector"], return_delta_v=plan["return_delta_v_km_s"])
     else:
         output["thrust_command"] = None
+
+    tca_point = None
+    if sat_tca is not None and debris_tca is not None:
+        tca_point = (np.asarray(sat_tca, dtype=float) + np.asarray(debris_tca, dtype=float)) * 0.5
+    if protected_orbit.ndim == 2 and protected_orbit.shape[0] > 0 and highest_risk_debris_orbit.ndim == 2 and highest_risk_debris_orbit.shape[0] > 0:
+        try:
+            plot_interactive_3d(
+                earth_radius_km=6378.0,
+                satellite_xyz=protected_orbit,
+                debris_xyz=highest_risk_debris_orbit,
+                tca_point=tca_point,
+                avoidance_xyz=interactive_avoidance_xyz,
+                return_xyz=interactive_return_xyz,
+                title="LEO Encounter: Protected vs Highest-Risk Debris (Interactive)",
+                output_path=PROCESSED_DATA_DIR / "real_encounter_interactive.html",
+            )
+        except Exception as exc:
+            print(f"[WARN] interactive visualization skipped: {exc}")
 
     with decision_json.open("w", encoding="utf-8") as f_decision:
         json.dump(output, f_decision, indent=2)

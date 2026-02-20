@@ -33,17 +33,18 @@ def _set_equal_axes(ax, points: np.ndarray) -> None:
 
 def plot_synthetic_scenario(
     scenario_name: str,
-    satellite_orbit_km: np.ndarray,
-    debris_orbit_km: np.ndarray,
+    scenario_plot_tag: str,
+    satellite_original_states: np.ndarray,
+    debris_states: np.ndarray,
     tca_point_km: np.ndarray,
-    avoidance_orbit_km: np.ndarray,
-    return_orbit_km: np.ndarray,
+    avoidance_states: np.ndarray,
+    return_states: np.ndarray,
 ) -> str:
-    satellite_orbit_km = np.asarray(satellite_orbit_km, dtype=float)
-    debris_orbit_km = np.asarray(debris_orbit_km, dtype=float)
+    satellite_original_states = np.asarray(satellite_original_states, dtype=float)
+    debris_states = np.asarray(debris_states, dtype=float)
     tca_point_km = np.asarray(tca_point_km, dtype=float)
-    avoidance_orbit_km = np.asarray(avoidance_orbit_km, dtype=float)
-    return_orbit_km = np.asarray(return_orbit_km, dtype=float)
+    avoidance_states = np.asarray(avoidance_states, dtype=float)
+    return_states = np.asarray(return_states, dtype=float)
 
     fig = plt.figure(figsize=(9, 7))
     ax = fig.add_subplot(111, projection="3d")
@@ -52,20 +53,22 @@ def plot_synthetic_scenario(
     earth_proxy = plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="lightsteelblue", markersize=10, label="Earth")
 
     sat_line, = ax.plot(
-        satellite_orbit_km[:, 0],
-        satellite_orbit_km[:, 1],
-        satellite_orbit_km[:, 2],
+        satellite_original_states[:, 0],
+        satellite_original_states[:, 1],
+        satellite_original_states[:, 2],
         color="blue",
-        linewidth=1.8,
+        linewidth=2.4,
         label="Original Satellite Orbit",
+        zorder=3,
     )
     debris_line, = ax.plot(
-        debris_orbit_km[:, 0],
-        debris_orbit_km[:, 1],
-        debris_orbit_km[:, 2],
+        debris_states[:, 0],
+        debris_states[:, 1],
+        debris_states[:, 2],
         color="red",
-        linewidth=1.6,
+        linewidth=1.8,
         label="Debris Trajectory",
+        zorder=4,
     )
     tca_handle = ax.scatter(
         tca_point_km[0],
@@ -78,28 +81,30 @@ def plot_synthetic_scenario(
         label="TCA Point",
     )
     avoid_line, = ax.plot(
-        avoidance_orbit_km[:, 0],
-        avoidance_orbit_km[:, 1],
-        avoidance_orbit_km[:, 2],
+        avoidance_states[:, 0],
+        avoidance_states[:, 1],
+        avoidance_states[:, 2],
         color="green",
-        linewidth=1.8,
-        label="Avoidance Trajectory",
+        linewidth=2.0,
+        label="Avoidance Arc",
+        zorder=5,
     )
     return_line, = ax.plot(
-        return_orbit_km[:, 0],
-        return_orbit_km[:, 1],
-        return_orbit_km[:, 2],
+        return_states[:, 0],
+        return_states[:, 1],
+        return_states[:, 2],
         color="purple",
-        linewidth=1.8,
+        linewidth=2.0,
         label="Return-to-Orbit",
+        zorder=6,
     )
 
     all_points = np.vstack(
         [
-            satellite_orbit_km,
-            debris_orbit_km,
-            avoidance_orbit_km,
-            return_orbit_km,
+            satellite_original_states,
+            debris_states,
+            avoidance_states,
+            return_states,
             tca_point_km.reshape(1, 3),
             np.array([[0.0, 0.0, 0.0]], dtype=float),
         ]
@@ -112,7 +117,7 @@ def plot_synthetic_scenario(
     ax.set_zlabel("Z (km)")
     ax.legend(handles=[earth_proxy, sat_line, debris_line, tca_handle, avoid_line, return_line], loc="best")
 
-    output_path = PLOTS_DIR / f"synthetic_{scenario_name}.png"
+    output_path = PLOTS_DIR / f"synthetic_{scenario_plot_tag}.png"
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
