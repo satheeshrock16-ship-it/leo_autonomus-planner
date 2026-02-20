@@ -8,3 +8,7 @@ venv/
 # Generated data
 data/processed/
 visualization/artifacts/
+__pycache__/
+*.pyc
+data/processed/
+visualization/artifacts/
