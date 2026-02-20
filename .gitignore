@@ -12,3 +12,9 @@ __pycache__/
 *.pyc
 data/processed/
 visualization/artifacts/
+
+__pycache__/
+*.pyc
+venv/
+data/processed/
+*.html

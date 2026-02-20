@@ -4,3 +4,4 @@ sgp4
 matplotlib
 pyserial
 lightgbm
+plotly
