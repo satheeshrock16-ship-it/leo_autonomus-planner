@@ -1,0 +1,34 @@
+propagation:
+  timestep_seconds: 60
+  screening_window_hours: 72
+  deterministic_epoch_utc: "2026-01-01T00:00:00+00:00"
+  benchmark_timestep_seconds: 120
+  benchmark_window_hours: 2
+
+covariance:
+  sigma_r_m: 120.0
+  sigma_t_m: 180.0
+  sigma_n_m: 150.0
+  hard_body_radius_m: 10.0
+  integration_points_z: 81
+  integration_points_rho: 36
+  integration_points_theta: 72
+
+tca_refinement:
+  fit_window_samples: 2
+
+maneuver:
+  separation_constraint_km: 2.0
+  burn_lead_orbits_min: 0.1
+  burn_lead_orbits_max: 2.0
+  burn_sweep_points: 24
+  max_delta_v_km_s: 0.02
+  fuel_remaining_default: 1.0
+
+performance:
+  benchmark_counts: [100, 1000, 5000]
+  parallel_workers: 4
+
+synthetic_ml:
+  training_samples: 2500
+  random_seed: 42
