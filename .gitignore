@@ -18,3 +18,9 @@ __pycache__/
 venv/
 data/processed/
 *.html
+
+
+results/
+__pycache__/
+*.pyc
+*.rar

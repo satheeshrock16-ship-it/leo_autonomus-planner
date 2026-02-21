@@ -5,3 +5,5 @@ matplotlib
 pyserial
 lightgbm
 plotly
+pyyaml
+pytest
