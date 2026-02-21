@@ -74,3 +74,32 @@ def optimize_burn_timing(
         "feasible": best["feasible"],
         "candidates": candidates,
     }
+
+
+def plan_collision_avoidance_delta_v(
+    min_distance_km: float,
+    relative_velocity_km_s: float,
+    desired_separation_km: float = 120.0,
+    lead_time_s: float = 600.0,
+    max_delta_v_km_s: float = 0.05,
+) -> float:
+    _ = max(float(relative_velocity_km_s), 0.0)  # explicit API parameter for future coupling.
+    gap_km = max(float(desired_separation_km) - float(min_distance_km), 0.0)
+    if gap_km <= 0.0:
+        return 0.0
+    dv = gap_km / max(float(lead_time_s), 1e-6)
+    return float(min(max(dv, 0.0), float(max_delta_v_km_s)))
+
+
+def tangential_delta_v_from_miss_distance(
+    predicted_miss_km: float,
+    sat_position_norm_km: float,
+    mu_km3_s2: float = 398600.4418,
+    safe_distance_km: float = 5.0,
+) -> float:
+    r_km = float(max(sat_position_norm_km, 1e-9))
+    v_circ = float(np.sqrt(float(mu_km3_s2) / r_km))
+    delta_r = float(safe_distance_km) - float(predicted_miss_km)
+    if delta_r <= 0.0:
+        return 0.0
+    return float((v_circ / r_km) * delta_r)
