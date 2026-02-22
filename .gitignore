@@ -21,6 +21,7 @@ data/processed/
 
 
 results/
+logs/
 __pycache__/
 *.pyc
 *.rar

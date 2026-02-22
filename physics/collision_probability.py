@@ -1,32 +1,16 @@
-"""Collision probability via a simple Gaussian miss-distance model."""
+"""Scalar collision probability fallback based on Gaussian hard-body integration."""
 from __future__ import annotations
 
-import logging
-import math
-
-LOGGER = logging.getLogger(__name__)
+from physics.collision_probability_3d import collision_probability_3d_alfano
 
 
-def collision_probability(closest_approach_km: float, sigma_m: float = 100.0) -> float:
-    """Compute collision probability from scalar miss distance with strict unit handling.
-
-    Orbital propagation distances are in kilometers.
-    Probability math is performed in meters.
-    """
-    closest_approach_km = float(closest_approach_km)
-    miss_distance_m = closest_approach_km * 1000.0
-    sigma = float(sigma_m)
-
-    if closest_approach_km > 1.0:
-        pc = 0.0
-    else:
-        pc = float(math.exp(-(miss_distance_m**2) / (2.0 * sigma**2)))
-
-    LOGGER.debug(
-        "Scalar Pc fallback used: miss_km=%.6f miss_m=%.3f sigma_m=%.3f pc=%.6e",
-        closest_approach_km,
-        miss_distance_m,
-        sigma,
-        pc,
+def collision_probability(closest_approach_km: float, sigma_m: float = 100.0, hard_body_radius_m: float = 10.0) -> float:
+    """Fallback scalar Pc for callers without full state vectors."""
+    res = collision_probability_3d_alfano(
+        rel_pos_rtn_km=[float(closest_approach_km), 0.0, 0.0],
+        sigma_rtn_m=(float(sigma_m), float(sigma_m), float(sigma_m)),
+        hard_body_radius_m=float(hard_body_radius_m),
+        integration_points_rho=40,
+        integration_points_theta=96,
     )
-    return pc
+    return float(res["Pc"])

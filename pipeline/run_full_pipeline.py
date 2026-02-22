@@ -20,16 +20,21 @@ from ai.pinn_model import CWPhysicsInformedValidator
 from config import (
     COLLISION_PROBABILITY_THRESHOLD,
     DEBRIS_DATA_DIR,
+    LOGS_DIR,
     MANEUVER_CONFIG,
     MODEL_DIR,
     PERFORMANCE_CONFIG,
     PROCESSED_DATA_DIR,
     PROPAGATION_CONFIG,
     SATELLITE_DATA_DIR,
+    SAFE_DISTANCE_KM,
+    TCA_REFINEMENT_CONFIG,
 )
-from physics.maneuver import build_thrust_vector, burn_duration_ms
+from physics.burn_physics import FuelState, solve_burn_from_delta_v_vector
+from physics.constants import SATELLITE_INITIAL_MASS_KG
+from physics.maneuver import build_thrust_vector
 from physics.maneuver_optimizer import analytical_required_delta_v_km_s, optimize_burn_timing
-from physics.tca_refinement import refine_tca_quadratic
+from physics.tca_refinement import refine_tca_analytic
 from pipeline import collision_check, fetch_data
 from pipeline.propulsion_interface import ThrustCommand
 from results.performance_benchmark import plot_runtime_scaling, write_performance_metrics
@@ -40,9 +45,19 @@ from visualization.plot_orbit import plot_orbits
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 LOGGER = logging.getLogger(__name__)
+CONJUNCTION_LOG = LOGS_DIR / "conjunction_analysis.log"
+_FILE_HANDLER = logging.FileHandler(CONJUNCTION_LOG, encoding="utf-8")
+_FILE_HANDLER.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+_ROOT_LOGGER = logging.getLogger()
+if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", None) == str(CONJUNCTION_LOG) for h in _ROOT_LOGGER.handlers):
+    _ROOT_LOGGER.addHandler(_FILE_HANDLER)
 
 SATELLITE_TLE_PATH = SATELLITE_DATA_DIR / "satellite_tles.json"
 DEBRIS_TLE_PATH = DEBRIS_DATA_DIR / "debris_tles.json"
+
+
+def _log_structured(payload: dict[str, Any]) -> None:
+    LOGGER.info("CONJUNCTION_ANALYSIS %s", json.dumps(payload, sort_keys=True))
 
 
 @dataclass
@@ -193,6 +208,14 @@ def _run_performance_benchmark(sat_record: dict[str, Any], debris_records: list[
             min_dist = min(min_dist, float(np.min(dist)))
         dt = perf_counter() - t0
         timings.append({"debris_count": float(count), "runtime_seconds": float(dt), "min_distance_km": min_dist})
+        _log_structured(
+            {
+                "pipeline": "benchmark",
+                "debris_count": int(count),
+                "runtime_seconds": float(dt),
+                "min_distance_km": float(min_dist),
+            }
+        )
 
     metrics_rows = [{"debris_count": row["debris_count"], "runtime_seconds": row["runtime_seconds"]} for row in timings]
     csv_path = write_performance_metrics(metrics_rows)
@@ -201,6 +224,7 @@ def _run_performance_benchmark(sat_record: dict[str, Any], debris_records: list[
 
 
 def run_autonomous_cycle(fetch_live_data: bool = False, benchmark_mode: bool = False) -> dict[str, Any]:
+    cycle_t0 = perf_counter()
     if fetch_live_data:
         fetch_data.run(limit=100)
 
@@ -238,6 +262,10 @@ def run_autonomous_cycle(fetch_live_data: bool = False, benchmark_mode: bool = F
                     writer.writerow([epoch.isoformat(), "debris", deb.norad_id, deb.pos_km[i, 0], deb.pos_km[i, 1], deb.pos_km[i, 2], deb.vel_km_s[i, 0], deb.vel_km_s[i, 1], deb.vel_km_s[i, 2]])
 
     conjunction_rows: list[dict[str, Any]] = []
+    fuel_state = FuelState(
+        initial_mass_kg=float(MANEUVER_CONFIG.get("initial_mass_kg", SATELLITE_INITIAL_MASS_KG)),
+        propellant_fraction=float(MANEUVER_CONFIG.get("propellant_fraction_default", 0.3)),
+    )
     sat_rel_positions: list[np.ndarray] = []
     sat_rel_velocities: list[np.ndarray] = []
     previous_best_rel = None
@@ -274,18 +302,28 @@ def run_autonomous_cycle(fetch_live_data: bool = False, benchmark_mode: bool = F
         idx = int(np.argmin(masked_dist))
         if not np.isfinite(masked_dist[idx]):
             continue
-        refined = refine_tca_quadratic(
-            time_s=time_offsets_s[valid],
-            distance_km=dist[valid],
-            fit_window_samples=2,
+        refined = refine_tca_analytic(
+            time_s=time_offsets_s,
+            sat_pos_km=sat_pos,
+            sat_vel_km_s=sat_vel,
+            debris_pos_km=deb.pos_km,
+            debris_vel_km_s=deb.vel_km_s,
+            min_index=idx,
+            search_window_s=float(PROPAGATION_CONFIG.get("timestep_seconds", 60))
+            * float(TCA_REFINEMENT_CONFIG.get("search_window_multiplier", 1.0)),
             epoch_utc=start_time,
         )
         pc_detail = collision_check.run_detailed(
-            float(masked_dist[idx]),
-            sat_r_eci_km=sat_pos[idx],
-            sat_v_eci_km_s=sat_vel[idx],
-            rel_r_eci_km=rel[idx],
-            rel_v_eci_km_s=rel_vel[idx],
+            float(refined["refined_min_distance"]),
+            sat_r_eci_km=refined["sat_tca_km"],
+            sat_v_eci_km_s=refined["sat_tca_vel_km_s"],
+            rel_r_eci_km=refined["rel_tca_km"],
+            rel_v_eci_km_s=refined["rel_vel_tca_km_s"],
+            covariance_dt_s=float(refined.get("coarse_to_refined_dt_s", 0.0)),
+            run_monte_carlo=False,
+            fast_mode=True,
+            integration_points_rho=16,
+            integration_points_theta=48,
         )
         conjunction_rows.append(
             {
@@ -294,27 +332,87 @@ def run_autonomous_cycle(fetch_live_data: bool = False, benchmark_mode: bool = F
                 "refined_tca_utc": str(refined["refined_tca_time"]),
                 "miss_distance_km": float(masked_dist[idx]),
                 "refined_min_distance_km": float(refined["refined_min_distance"]),
-                "rel_x_km": float(rel[idx, 0]),
-                "rel_y_km": float(rel[idx, 1]),
-                "rel_z_km": float(rel[idx, 2]),
+                "rel_x_km": float(refined["rel_tca_km"][0]),
+                "rel_y_km": float(refined["rel_tca_km"][1]),
+                "rel_z_km": float(refined["rel_tca_km"][2]),
                 "collision_probability": float(pc_detail["Pc"]),
+                "collision_probability_mc": float(pc_detail.get("Pc_mc", float("nan"))),
+                "pc_abs_error": float(pc_detail.get("pc_abs_error", float("nan"))),
+                "pc_relative_error": float(pc_detail.get("pc_relative_error", float("nan"))),
                 "confidence_metric": float(pc_detail["confidence_metric"]),
-                "sat_tca_km": sat_pos[idx].copy(),
-                "debris_tca_km": deb.pos_km[idx].copy(),
+                "relative_cov_rr_m2": float(pc_detail.get("relative_cov_rr_m2", 0.0)),
+                "relative_cov_tt_m2": float(pc_detail.get("relative_cov_tt_m2", 0.0)),
+                "relative_cov_nn_m2": float(pc_detail.get("relative_cov_nn_m2", 0.0)),
+                "sat_tca_km": np.asarray(refined["sat_tca_km"], dtype=float).copy(),
+                "debris_tca_km": np.asarray(refined["debris_tca_km"], dtype=float).copy(),
+                "sat_tca_vel_km_s": np.asarray(refined["sat_tca_vel_km_s"], dtype=float).copy(),
+                "debris_tca_vel_km_s": np.asarray(refined["debris_tca_vel_km_s"], dtype=float).copy(),
+                "refined_time_s": float(refined["refined_time_s"]),
+                "covariance_dt_s": float(refined.get("coarse_to_refined_dt_s", 0.0)),
             }
         )
     conjunction_rows.sort(key=lambda row: row["miss_distance_km"])
 
     with conjunction_csv.open("w", newline="", encoding="utf-8") as f_conj:
         writer = csv.writer(f_conj)
-        writer.writerow(["debris_norad_id", "tca_utc", "refined_tca_utc", "miss_distance_km", "refined_min_distance_km", "rel_x_km", "rel_y_km", "rel_z_km", "collision_probability", "confidence_metric"])
+        writer.writerow(
+            [
+                "debris_norad_id",
+                "tca_utc",
+                "refined_tca_utc",
+                "miss_distance_km",
+                "refined_min_distance_km",
+                "rel_x_km",
+                "rel_y_km",
+                "rel_z_km",
+                "collision_probability",
+                "collision_probability_mc",
+                "pc_abs_error",
+                "pc_relative_error",
+                "confidence_metric",
+            ]
+        )
         for row in conjunction_rows:
-            writer.writerow([row["debris_norad_id"], row["tca_utc"], row["refined_tca_utc"], row["miss_distance_km"], row["refined_min_distance_km"], row["rel_x_km"], row["rel_y_km"], row["rel_z_km"], row["collision_probability"], row["confidence_metric"]])
+            writer.writerow(
+                [
+                    row["debris_norad_id"],
+                    row["tca_utc"],
+                    row["refined_tca_utc"],
+                    row["miss_distance_km"],
+                    row["refined_min_distance_km"],
+                    row["rel_x_km"],
+                    row["rel_y_km"],
+                    row["rel_z_km"],
+                    row["collision_probability"],
+                    row["collision_probability_mc"],
+                    row["pc_abs_error"],
+                    row["pc_relative_error"],
+                    row["confidence_metric"],
+                ]
+            )
 
     if not conjunction_rows:
         raise RuntimeError("No conjunction results produced from propagated states.")
     highest_risk = max(conjunction_rows, key=lambda row: row["collision_probability"])
+    highest_risk_detail = collision_check.run_detailed(
+        float(highest_risk["refined_min_distance_km"]),
+        sat_r_eci_km=np.asarray(highest_risk["sat_tca_km"], dtype=float),
+        sat_v_eci_km_s=np.asarray(highest_risk["sat_tca_vel_km_s"], dtype=float),
+        rel_r_eci_km=np.array([highest_risk["rel_x_km"], highest_risk["rel_y_km"], highest_risk["rel_z_km"]], dtype=float),
+        rel_v_eci_km_s=np.asarray(highest_risk["debris_tca_vel_km_s"], dtype=float) - np.asarray(highest_risk["sat_tca_vel_km_s"], dtype=float),
+        covariance_dt_s=float(highest_risk.get("covariance_dt_s", 0.0)),
+        run_monte_carlo=True,
+    )
+    highest_risk["collision_probability"] = float(highest_risk_detail["Pc"])
+    highest_risk["collision_probability_mc"] = float(highest_risk_detail.get("Pc_mc", float("nan")))
+    highest_risk["pc_abs_error"] = float(highest_risk_detail.get("pc_abs_error", float("nan")))
+    highest_risk["pc_relative_error"] = float(highest_risk_detail.get("pc_relative_error", float("nan")))
+    highest_risk["confidence_metric"] = float(highest_risk_detail["confidence_metric"])
+    highest_risk["relative_cov_rr_m2"] = float(highest_risk_detail.get("relative_cov_rr_m2", 0.0))
+    highest_risk["relative_cov_tt_m2"] = float(highest_risk_detail.get("relative_cov_tt_m2", 0.0))
+    highest_risk["relative_cov_nn_m2"] = float(highest_risk_detail.get("relative_cov_nn_m2", 0.0))
     pc = float(highest_risk["collision_probability"])
+    pc_mc = float(highest_risk["collision_probability_mc"])
     closest_miss_km = float(highest_risk["miss_distance_km"])
     refined_miss_km = float(highest_risk["refined_min_distance_km"])
 
@@ -339,12 +437,13 @@ def run_autonomous_cycle(fetch_live_data: bool = False, benchmark_mode: bool = F
     uncertainty = MonteCarloDropoutBNN().predict(pc)
 
     dv_model = _load_delta_v_model()
-    tca_dt = datetime.fromisoformat(str(highest_risk["tca_utc"]))
+    tca_dt = datetime.fromisoformat(str(highest_risk["refined_tca_utc"]))
     time_to_tca = max((tca_dt - start_time).total_seconds(), 1.0)
-    fuel_remaining = float(MANEUVER_CONFIG.get("fuel_remaining_default", 1.0))
+    initial_propellant = max(float(fuel_state.initial_mass_kg - fuel_state.dry_mass_kg), 1e-9)
+    fuel_remaining = float(fuel_state.remaining_propellant_kg / initial_propellant)
     analytical_dv = analytical_required_delta_v_km_s(
         miss_distance_km=refined_miss_km,
-        separation_constraint_km=float(MANEUVER_CONFIG.get("separation_constraint_km", 2.0)),
+        separation_constraint_km=float(MANEUVER_CONFIG.get("separation_constraint_km", SAFE_DISTANCE_KM)),
         lead_time_s=time_to_tca,
         max_delta_v_km_s=float(MANEUVER_CONFIG.get("max_delta_v_km_s", 0.02)),
     )
@@ -357,14 +456,19 @@ def run_autonomous_cycle(fetch_live_data: bool = False, benchmark_mode: bool = F
         tca_time_s=time_to_tca,
         orbit_period_s=5400.0,
         miss_distance_km=refined_miss_km,
-        separation_constraint_km=float(MANEUVER_CONFIG.get("separation_constraint_km", 2.0)),
+        separation_constraint_km=float(MANEUVER_CONFIG.get("separation_constraint_km", SAFE_DISTANCE_KM)),
         lead_orbits_min=float(MANEUVER_CONFIG.get("burn_lead_orbits_min", 0.1)),
         lead_orbits_max=float(MANEUVER_CONFIG.get("burn_lead_orbits_max", 2.0)),
         sweep_points=int(MANEUVER_CONFIG.get("burn_sweep_points", 24)),
         max_delta_v_km_s=float(MANEUVER_CONFIG.get("max_delta_v_km_s", 0.02)),
+        collision_probability=pc,
+        collision_probability_threshold=float(COLLISION_PROBABILITY_THRESHOLD),
+        lambda_fuel_penalty=float(MANEUVER_CONFIG.get("fuel_penalty_weight", 0.0)),
+        current_mass_kg=float(fuel_state.current_mass_kg),
+        safe_distance_km=float(SAFE_DISTANCE_KM),
     )
     selected_dv = float(max(timing["required_delta_v_km_s"], ml_pred_dv))
-    should_burn = bool(pc > COLLISION_PROBABILITY_THRESHOLD and selected_dv > 0.0)
+    should_burn = bool((pc > COLLISION_PROBABILITY_THRESHOLD or refined_miss_km < SAFE_DISTANCE_KM) and selected_dv > 0.0)
 
     output: dict[str, Any] = {
         "satellite_tle_path": str(SATELLITE_TLE_PATH),
@@ -375,6 +479,9 @@ def run_autonomous_cycle(fetch_live_data: bool = False, benchmark_mode: bool = F
         "timestep_seconds": int(PROPAGATION_CONFIG.get("timestep_seconds", 60)),
         "deterministic_epoch_utc": start_time.isoformat(),
         "collision_probability": pc,
+        "collision_probability_monte_carlo": pc_mc,
+        "collision_probability_abs_error": float(highest_risk.get("pc_abs_error", float("nan"))),
+        "collision_probability_relative_error": float(highest_risk.get("pc_relative_error", float("nan"))),
         "collision_confidence": float(highest_risk["confidence_metric"]),
         "closest_approach_km": closest_miss_km,
         "refined_min_distance_km": refined_miss_km,
@@ -382,12 +489,25 @@ def run_autonomous_cycle(fetch_live_data: bool = False, benchmark_mode: bool = F
         "highest_risk_tca_utc": highest_risk["tca_utc"],
         "highest_risk_refined_tca_utc": highest_risk["refined_tca_utc"],
         "pinn_physics_mse": pinn_report.mse_physics,
-        "covariance_diagonal_km2": [],
+        "covariance_diagonal_km2": [
+            float(highest_risk.get("relative_cov_rr_m2", 0.0) / 1_000_000.0),
+            float(highest_risk.get("relative_cov_tt_m2", 0.0) / 1_000_000.0),
+            float(highest_risk.get("relative_cov_nn_m2", 0.0) / 1_000_000.0),
+        ],
         "decision": should_burn,
         "decision_confidence": float(max(min(1.0 - uncertainty.epistemic_std, 1.0), 0.0)),
         "predicted_delta_v_km_s": selected_dv,
         "ml_predicted_delta_v_km_s": ml_pred_dv,
         "analytical_required_delta_v_km_s": float(timing["required_delta_v_km_s"]),
+        "conjunction_log": str(CONJUNCTION_LOG),
+        "fuel_state": {
+            "current_mass_kg": float(fuel_state.current_mass_kg),
+            "dry_mass_kg": float(fuel_state.dry_mass_kg),
+            "remaining_propellant_kg": float(fuel_state.remaining_propellant_kg),
+            "burn_count": int(fuel_state.burn_count),
+            "total_delta_v_km_s": float(fuel_state.total_delta_v_km_s),
+            "mass_history_kg": [float(v) for v in fuel_state.mass_history_kg],
+        },
         "outputs": {"propagated_states_csv": str(propagated_csv), "conjunction_results_csv": str(conjunction_csv), "decision_json": str(decision_json)},
     }
 
@@ -395,13 +515,27 @@ def run_autonomous_cycle(fetch_live_data: bool = False, benchmark_mode: bool = F
     interactive_return_xyz = None
     if should_burn:
         thrust_vector = build_thrust_vector(selected_dv, "tangential")
-        cmd = ThrustCommand(thrust_vector=[float(v) for v in thrust_vector], duration_ms=burn_duration_ms(selected_dv), burn_type="tangential")
+        burn_solution = solve_burn_from_delta_v_vector(
+            delta_v_vector_km_s=np.asarray(thrust_vector, dtype=float),
+            mass_kg=float(fuel_state.current_mass_kg),
+        )
+        fuel_update = fuel_state.apply_delta_v_vector(np.asarray(thrust_vector, dtype=float))
+        cmd = ThrustCommand(
+            thrust_vector=[float(v) for v in thrust_vector],
+            duration_ms=int(max(50, round(float(burn_solution["burn_time_seconds"]) * 1000.0))),
+            burn_type="tangential",
+        )
         output["thrust_command"] = {
             "thrust_vector": cmd.thrust_vector,
             "duration_ms": cmd.duration_ms,
             "burn_type": cmd.burn_type,
             "burn_time_s": float(timing["burn_time_s"]),
             "burn_lead_time_s": float(time_to_tca - timing["burn_time_s"]),
+            "burn_execution_time_s": float(burn_solution["burn_time_seconds"]),
+            "mass_before_kg": float(burn_solution["mass_before_kg"]),
+            "mass_after_kg": float(burn_solution["mass_after_kg"]),
+            "propellant_used_kg": float(burn_solution["propellant_used_kg"]),
+            "remaining_propellant_kg": float(fuel_update["remaining_propellant_kg"]),
         }
         if protected_orbit.ndim == 2 and protected_orbit.shape[0] > 0:
             tca_idx = int(np.argmin(np.linalg.norm(protected_orbit - sat_tca.reshape(1, 3), axis=1)))
@@ -430,8 +564,34 @@ def run_autonomous_cycle(fetch_live_data: bool = False, benchmark_mode: bool = F
         except Exception as exc:
             LOGGER.warning("interactive visualization skipped: %s", exc)
 
+    output["fuel_state"] = {
+        "current_mass_kg": float(fuel_state.current_mass_kg),
+        "dry_mass_kg": float(fuel_state.dry_mass_kg),
+        "remaining_propellant_kg": float(fuel_state.remaining_propellant_kg),
+        "burn_count": int(fuel_state.burn_count),
+        "total_delta_v_km_s": float(fuel_state.total_delta_v_km_s),
+        "mass_history_kg": [float(v) for v in fuel_state.mass_history_kg],
+        "burn_history": fuel_state.burn_history,
+    }
+
     if benchmark_mode:
         output["performance_benchmark"] = _run_performance_benchmark(protected_satellite, debris_records)
+
+    runtime_seconds = float(perf_counter() - cycle_t0)
+    output["runtime_seconds"] = runtime_seconds
+    _log_structured(
+        {
+            "pipeline": "real",
+            "tca_time_utc": str(highest_risk["refined_tca_utc"]),
+            "miss_distance_km": refined_miss_km,
+            "analytical_pc": pc,
+            "monte_carlo_pc": pc_mc,
+            "delta_v_km_s": selected_dv if should_burn else 0.0,
+            "remaining_mass_kg": float(fuel_state.current_mass_kg),
+            "runtime_seconds": runtime_seconds,
+            "burn_count": int(fuel_state.burn_count),
+        }
+    )
 
     with decision_json.open("w", encoding="utf-8") as f_decision:
         json.dump(output, f_decision, indent=2)

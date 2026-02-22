@@ -10,13 +10,15 @@ import numpy as np
 
 from config import PROCESSED_DATA_DIR
 from hardware.propulsion_controller import send_propulsion_command
-from physics.burn_physics import SATELLITE_MASS_KG, THRUST_N, solve_burn_from_delta_v_vector
+from physics.burn_physics import FuelState, SATELLITE_MASS_KG, THRUST_N, solve_burn_from_delta_v_vector
+from physics.constants import SAFE_DISTANCE_KM
 from physics.maneuver_optimizer import tangential_delta_v_from_miss_distance
 from physics.orbit_intersection import OrbitalElements, align_orbits_at_node, orbit_period_seconds, propagate_orbit
+from physics.tca_refinement import refine_tca_analytic
+from pipeline import collision_check
 from visualization.plot_3d_encounter import plot_3d_encounter
 
 
-SAFE_DISTANCE_KM = 5.0
 MU = 398600.4418  # km^3/s^2
 
 
@@ -60,11 +62,6 @@ def _propagate_two_body_arc(r0_km: np.ndarray, v0_km_s: np.ndarray, t_rel_s: np.
         pos[idx] = r + (dt / 6.0) * (k1_r + 2.0 * k2_r + 2.0 * k3_r + k4_r)
         vel[idx] = v + (dt / 6.0) * (k1_v + 2.0 * k2_v + 2.0 * k3_v + k4_v)
     return pos, vel
-
-
-def _compute_collision_probability(min_distance_km: float) -> float:
-    sigma = SAFE_DISTANCE_KM
-    return float(np.exp(-0.5 * (float(min_distance_km) / sigma) ** 2))
 
 
 def _build_avoidance_and_return_arcs(
@@ -165,9 +162,18 @@ def run_synthetic_scenario(scenario: SyntheticScenario) -> dict[str, Any]:
     rel_vel = deb_vel - sat_vel
     dist = np.linalg.norm(rel_xyz, axis=1)
     tca_idx = int(np.argmin(dist))
-    min_distance_km = float(dist[tca_idx])
-    relative_velocity_km_s = float(np.linalg.norm(rel_vel[tca_idx]))
-    tca_point_km = (sat_xyz[tca_idx] + deb_xyz[tca_idx]) * 0.5
+    refined = refine_tca_analytic(
+        time_s=t_s,
+        sat_pos_km=sat_xyz,
+        sat_vel_km_s=sat_vel,
+        debris_pos_km=deb_xyz,
+        debris_vel_km_s=deb_vel,
+        min_index=tca_idx,
+        search_window_s=1.0,
+    )
+    min_distance_km = float(refined["refined_min_distance"])
+    relative_velocity_km_s = float(np.linalg.norm(refined["rel_vel_tca_km_s"]))
+    tca_point_km = (np.asarray(refined["sat_tca_km"], dtype=float) + np.asarray(refined["debris_tca_km"], dtype=float)) * 0.5
 
     if scenario.expected_min_km is not None:
         assert min_distance_km > float(scenario.expected_min_km), (
@@ -178,8 +184,8 @@ def run_synthetic_scenario(scenario: SyntheticScenario) -> dict[str, Any]:
             f"{scenario.name}: min_distance={min_distance_km:.6f} is above {scenario.expected_max_km:.6f}"
         )
 
-    r_km = float(np.linalg.norm(sat_xyz[tca_idx]))
-    v_vec = sat_vel[tca_idx]
+    r_km = float(np.linalg.norm(np.asarray(refined["sat_tca_km"], dtype=float)))
+    v_vec = np.asarray(refined["sat_tca_vel_km_s"], dtype=float)
     v_hat = v_vec / max(float(np.linalg.norm(v_vec)), 1e-12)
     delta_v_mag_km_s = tangential_delta_v_from_miss_distance(
         predicted_miss_km=min_distance_km,
@@ -188,10 +194,21 @@ def run_synthetic_scenario(scenario: SyntheticScenario) -> dict[str, Any]:
         safe_distance_km=SAFE_DISTANCE_KM,
     )
     delta_v_vector_km_s = v_hat * delta_v_mag_km_s
-    burn = solve_burn_from_delta_v_vector(delta_v_vector_km_s, mass_kg=SATELLITE_MASS_KG, force_newtons=THRUST_N)
+    fuel_state = FuelState(initial_mass_kg=SATELLITE_MASS_KG, propellant_fraction=0.3, force_newtons=THRUST_N)
+    burn = solve_burn_from_delta_v_vector(delta_v_vector_km_s, mass_kg=fuel_state.current_mass_kg, force_newtons=THRUST_N)
+    if delta_v_mag_km_s > 0.0:
+        fuel_state.apply_delta_v_vector(delta_v_vector_km_s)
     burn_time_s = float(burn["burn_time_seconds"])
     maneuver_triggered = bool(delta_v_mag_km_s > 0.0)
-    collision_probability = _compute_collision_probability(min_distance_km)
+    pc_detail = collision_check.run_detailed(
+        min_distance_km,
+        sat_r_eci_km=np.asarray(refined["sat_tca_km"], dtype=float),
+        sat_v_eci_km_s=np.asarray(refined["sat_tca_vel_km_s"], dtype=float),
+        rel_r_eci_km=np.asarray(refined["rel_tca_km"], dtype=float),
+        rel_v_eci_km_s=np.asarray(refined["rel_vel_tca_km_s"], dtype=float),
+        covariance_dt_s=float(refined.get("coarse_to_refined_dt_s", 0.0)),
+    )
+    collision_probability = float(pc_detail["Pc"])
     if scenario.expected_maneuver_triggered is not None:
         assert maneuver_triggered == bool(scenario.expected_maneuver_triggered), (
             f"{scenario.name}: maneuver_triggered={maneuver_triggered} does not match expected "
@@ -232,9 +249,11 @@ def run_synthetic_scenario(scenario: SyntheticScenario) -> dict[str, Any]:
     print(f"Minimum distance (km): {min_distance_km:.6f}")
     print(f"Relative velocity (km/s): {relative_velocity_km_s:.6f}")
     print(f"Collision probability: {collision_probability:.6f}")
+    print(f"Monte Carlo Pc: {float(pc_detail.get('Pc_mc', float('nan'))):.6f}")
     print(f"Maneuver triggered: {maneuver_triggered}")
     print(f"Delta-v magnitude (km/s): {delta_v_mag_km_s:.6f}")
     print(f"Burn time (s): {burn_time_s:.6f}")
+    print(f"Mass after burn (kg): {fuel_state.current_mass_kg:.6f}")
     print(f"Servo yaw (deg): {hw.yaw_deg:.2f}")
     print(f"Servo pitch (deg): {hw.pitch_deg:.2f}")
 
@@ -250,15 +269,25 @@ def run_synthetic_scenario(scenario: SyntheticScenario) -> dict[str, Any]:
         "minimum_distance_km": min_distance_km,
         "relative_velocity_km_s": relative_velocity_km_s,
         "collision_probability": collision_probability,
+        "collision_probability_monte_carlo": float(pc_detail.get("Pc_mc", float("nan"))),
+        "collision_probability_abs_error": float(pc_detail.get("pc_abs_error", float("nan"))),
+        "collision_probability_relative_error": float(pc_detail.get("pc_relative_error", float("nan"))),
         "maneuver_triggered": maneuver_triggered,
         "delta_v_vector_km_s": [float(v) for v in delta_v_vector_km_s],
         "delta_v_magnitude_km_s": delta_v_mag_km_s,
         "burn_time_seconds": burn_time_s,
+        "mass_before_kg": float(burn.get("mass_before_kg", SATELLITE_MASS_KG)),
+        "mass_after_kg": float(fuel_state.current_mass_kg),
+        "propellant_used_kg": float(burn.get("propellant_used_kg", 0.0)),
+        "remaining_propellant_kg": float(fuel_state.remaining_propellant_kg),
+        "burn_count": int(fuel_state.burn_count),
+        "total_delta_v_km_s": float(fuel_state.total_delta_v_km_s),
+        "mass_history_kg": [float(v) for v in fuel_state.mass_history_kg],
         "servo_yaw_deg": float(hw.yaw_deg),
         "servo_pitch_deg": float(hw.pitch_deg),
         "hardware_connected": bool(hw.connected),
         "serial_command": hw.command_string,
-        "tca_time_seconds": float(t_s[tca_idx]),
+        "tca_time_seconds": float(refined["refined_time_s"]),
         "interactive_html": plot_paths.get("interactive_html", ""),
         "snapshot_png": plot_paths.get("snapshot_png", ""),
     }
