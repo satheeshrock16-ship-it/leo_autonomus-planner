@@ -14,6 +14,8 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     serial = None
 
+SIMULATION_MODE_MESSAGE = "Hardware not connected \u2013 running in simulation mode."
+
 
 @dataclass
 class PropulsionCommandResult:
@@ -25,7 +27,7 @@ class PropulsionCommandResult:
 
 
 def delta_v_vector_to_servo_angles(delta_v_vector_km_s: np.ndarray) -> tuple[float, float]:
-    dv = np.asarray(delta_v_vector_km_s, dtype=float)
+    dv = np.asarray(delta_v_vector_km_s, dtype=float).reshape(3)
     x, y, z = float(dv[0]), float(dv[1]), float(dv[2])
     azimuth_rad = math.atan2(y, x)  # [-pi, pi]
     xy_norm = math.sqrt(x * x + y * y)
@@ -36,53 +38,63 @@ def delta_v_vector_to_servo_angles(delta_v_vector_km_s: np.ndarray) -> tuple[flo
     return yaw_deg, pitch_deg
 
 
-def _execution_burn_time_seconds(burn_time_physics: float) -> float:
-    burn_time_physics = float(max(float(burn_time_physics), 0.0))
+def _execution_burn_time_seconds(burn_time_seconds: float) -> float:
+    burn_time_seconds = float(max(float(burn_time_seconds), 0.0))
     if DEMO_MODE:
-        return float(burn_time_physics * float(EXECUTION_TIME_SCALE))
-    return burn_time_physics
+        scaled = burn_time_seconds * float(EXECUTION_TIME_SCALE)
+        return float(np.clip(scaled, 0.0, burn_time_seconds))
+    return burn_time_seconds
 
 
-def send_servo_command(yaw: float, pitch: float, serial_conn: object) -> None:
-    serial_conn.write(f"{yaw:.2f},{pitch:.2f}\n".encode("utf-8"))
+def _format_command_string(yaw_deg: float, pitch_deg: float, burn_time_seconds: float) -> str:
+    yaw = float(np.clip(float(yaw_deg), 0.0, 180.0))
+    pitch = float(np.clip(float(pitch_deg), 0.0, 180.0))
+    burn_time = float(max(float(burn_time_seconds), 0.0))
+    return f"{yaw:.2f},{pitch:.2f},{burn_time:.2f}"
+
+
+def _send_serial_signal(serial_conn: object, signal: str) -> None:
+    serial_conn.write(f"{signal}\n".encode("utf-8"))
+    serial_conn.flush()
 
 
 def execute_burn(
-    yaw: float,
-    pitch: float,
-    burn_time_physics: float,
+    delta_v_vector: np.ndarray,
+    burn_time_seconds: float,
     serial_port: str = SERIAL_PORT,
     baudrate: int = SERIAL_BAUDRATE,
-) -> tuple[float, bool]:
-    burn_time_physics = float(max(float(burn_time_physics), 0.0))
-    burn_time_exec = _execution_burn_time_seconds(burn_time_physics)
+) -> PropulsionCommandResult:
+    burn_time = float(max(float(burn_time_seconds), 0.0))
+    burn_time_exec = _execution_burn_time_seconds(burn_time)
 
-    print(f"Burn time (physics): {burn_time_physics:.2f} s")
-    print(f"Burn time (execution): {burn_time_exec:.2f} s")
+    try:
+        yaw_deg, pitch_deg = delta_v_vector_to_servo_angles(delta_v_vector)
+    except Exception:
+        yaw_deg, pitch_deg = 90.0, 90.0
+    yaw_deg = float(np.clip(yaw_deg, 0.0, 180.0))
+    pitch_deg = float(np.clip(pitch_deg, 0.0, 180.0))
+    command_string = _format_command_string(yaw_deg, pitch_deg, burn_time)
 
     if REAL_HARDWARE_MODE:
         try:
             if serial is None:
                 raise RuntimeError("pyserial is not installed.")
-
-            print("Sending thrust vector command to hardware...")
             with serial.Serial(serial_port, baudrate=baudrate, timeout=2) as serial_conn:
-                start_time = time.time()
-                while time.time() - start_time < burn_time_exec:
-                    send_servo_command(yaw, pitch, serial_conn)
-                    time.sleep(0.05)
+                _send_serial_signal(serial_conn, command_string)
+                time.sleep(burn_time_exec)
+                # Immediately command neutral orientation at burn completion.
+                _send_serial_signal(serial_conn, "90.00,90.00,0.00")
+            return PropulsionCommandResult(yaw_deg, pitch_deg, burn_time, True, command_string)
+        except Exception:
+            print(SIMULATION_MODE_MESSAGE)
+            print(f"Simulated signal: {command_string}")
+            time.sleep(burn_time_exec)
+            return PropulsionCommandResult(yaw_deg, pitch_deg, burn_time, False, command_string)
 
-            print("Burn execution complete.")
-            return burn_time_exec, True
-
-        except Exception as exc:
-            print("Hardware execution error:", str(exc))
-            return burn_time_exec, False
-
-    print("Hardware not connected - running in simulation mode.")
-    print(f"Simulated thrust vector: yaw={yaw:.2f}, pitch={pitch:.2f}")
-    print(f"Simulated burn duration: {burn_time_exec:.2f} s")
-    return burn_time_exec, False
+    print(SIMULATION_MODE_MESSAGE)
+    print(f"Simulated signal: {command_string}")
+    time.sleep(burn_time_exec)
+    return PropulsionCommandResult(yaw_deg, pitch_deg, burn_time, False, command_string)
 
 
 def send_propulsion_command(
@@ -91,14 +103,9 @@ def send_propulsion_command(
     serial_port: str = SERIAL_PORT,
     baudrate: int = SERIAL_BAUDRATE,
 ) -> PropulsionCommandResult:
-    yaw_deg, pitch_deg = delta_v_vector_to_servo_angles(delta_v_vector_km_s)
-    burn_time_physics = float(max(float(burn_time_seconds), 0.0))
-    burn_time_exec, connected = execute_burn(
-        yaw=yaw_deg,
-        pitch=pitch_deg,
-        burn_time_physics=burn_time_physics,
+    return execute_burn(
+        delta_v_vector=delta_v_vector_km_s,
+        burn_time_seconds=burn_time_seconds,
         serial_port=serial_port,
         baudrate=baudrate,
     )
-    command_string = f"{yaw_deg:.2f},{pitch_deg:.2f},{burn_time_exec:.2f}"
-    return PropulsionCommandResult(yaw_deg, pitch_deg, burn_time_physics, connected, command_string)

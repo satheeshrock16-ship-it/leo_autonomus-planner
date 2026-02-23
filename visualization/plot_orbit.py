@@ -29,7 +29,7 @@ def _plot_earth(ax, radius_km: float = EARTH_RADIUS_KM) -> Any:
     x = radius_km * np.outer(np.cos(u), np.sin(v))
     y = radius_km * np.outer(np.sin(u), np.sin(v))
     z = radius_km * np.outer(np.ones_like(u), np.cos(v))
-    ax.plot_surface(x, y, z, color="lightsteelblue", alpha=0.32, linewidth=0.0)
+    ax.plot_surface(x, y, z, color="lightsteelblue", alpha=0.5, linewidth=0.0)
     return plt.Line2D([0], [0], marker="o", color="w", markerfacecolor="lightsteelblue", markersize=10, label="Earth")
 
 
@@ -246,27 +246,22 @@ def plot_real_encounter_full(
         sat[:, 1],
         sat[:, 2],
         color="blue",
-        linewidth=2.8,
-        label="Protected Satellite",
+        linewidth=4.0,
+        label="Protected Orbit",
     )
 
     debris_handle = None
-    for idx, track in enumerate(debris_by_id.values()):
-        if track.size == 0:
-            continue
-        line, = ax.plot(track[:, 0], track[:, 1], track[:, 2], color="gray", linewidth=0.8, alpha=0.3, label="Debris" if idx == 0 else None)
-        if debris_handle is None:
-            debris_handle = line
-
-    highest_handle = None
-    if highest_risk_track.size > 0:
-        highest_handle, = ax.plot(
-            highest_risk_track[:, 0],
-            highest_risk_track[:, 1],
-            highest_risk_track[:, 2],
-            color="orange",
-            linewidth=2.4,
-            label="Highest-Risk Debris",
+    debris_tracks = [track for track in debris_by_id.values() if track.size > 0]
+    if debris_tracks:
+        debris_points = np.vstack(debris_tracks)
+        debris_handle = ax.scatter(
+            debris_points[:, 0],
+            debris_points[:, 1],
+            debris_points[:, 2],
+            color="red",
+            s=9,
+            alpha=0.7,
+            label="Debris",
         )
 
     tca_handle = None
@@ -326,8 +321,6 @@ def plot_real_encounter_full(
     handles = [earth_handle, sat_handle]
     if debris_handle is not None:
         handles.append(debris_handle)
-    if highest_handle is not None:
-        handles.append(highest_handle)
     if tca_handle is not None:
         handles.append(tca_handle)
     if avoidance_handle is not None:

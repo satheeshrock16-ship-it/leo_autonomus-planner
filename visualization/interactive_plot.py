@@ -29,7 +29,7 @@ def _earth_surface(radius_km: float) -> go.Surface:
         x=x,
         y=y,
         z=z,
-        opacity=0.35,
+        opacity=0.5,
         colorscale=[[0.0, "#B0C4DE"], [1.0, "#B0C4DE"]],
         showscale=False,
         name="Earth",
@@ -69,8 +69,8 @@ def plot_interactive_3d(
             y=satellite_xyz[:, 1],
             z=satellite_xyz[:, 2],
             mode="lines",
-            line=dict(color="blue", width=6),
-            name="Satellite Orbit",
+            line=dict(color="blue", width=4),
+            name="Protected Orbit",
         )
     )
     fig.add_trace(
@@ -78,9 +78,9 @@ def plot_interactive_3d(
             x=debris_xyz[:, 0],
             y=debris_xyz[:, 1],
             z=debris_xyz[:, 2],
-            mode="lines",
-            line=dict(color="red", width=5),
-            name="Debris Trajectory",
+            mode="markers",
+            marker=dict(size=3, color="red", opacity=0.7),
+            name="Debris",
         )
     )
 
