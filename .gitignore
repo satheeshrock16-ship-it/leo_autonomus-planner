@@ -25,3 +25,22 @@ logs/
 __pycache__/
 *.pyc
 *.rar
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# Node
+node_modules/
+build/
+
+# Env
+.envnode_modules/
+build/
+venv/
+*.log
+__pycache__/
+.env
