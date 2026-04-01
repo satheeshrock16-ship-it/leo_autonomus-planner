@@ -9,6 +9,15 @@ import numpy as np
 from physics.cw_equation import propagate_covariance_cw
 
 
+# Backward compatibility for numpy >= 2.0
+def _trapezoid(y, x=None):
+    """Trapezoidal integration compatible with NumPy 1.x and 2.x."""
+    if hasattr(np, 'trapezoid'):
+        return np.trapezoid(y, x)
+    else:
+        return np.trapz(y, x)
+
+
 def eci_to_rtn_rotation(r_eci_km: np.ndarray, v_eci_km_s: np.ndarray) -> np.ndarray:
     r = np.asarray(r_eci_km, dtype=float)
     v = np.asarray(v_eci_km_s, dtype=float)
@@ -150,7 +159,7 @@ def _integrate_gaussian_circle(
         delta = points - mu.reshape(1, 2)
         expo = -0.5 * np.sum((delta @ inv) * delta, axis=1)
         pdf = norm * np.exp(np.clip(expo, -700.0, 20.0))
-        total += float(np.trapz(pdf * rhos, rhos)) * d_theta
+        total += float(_trapezoid(pdf * rhos, rhos)) * d_theta
     return float(np.clip(total, 0.0, 1.0))
 
 

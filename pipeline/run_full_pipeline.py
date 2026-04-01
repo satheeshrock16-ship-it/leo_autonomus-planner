@@ -579,6 +579,49 @@ def run_autonomous_cycle(fetch_live_data: bool = False, benchmark_mode: bool = F
 
     runtime_seconds = float(perf_counter() - cycle_t0)
     output["runtime_seconds"] = runtime_seconds
+
+    # Collect structured data for API
+    objects = []
+    # Satellite
+    if sat_valid.any():
+        last_valid_idx = np.where(sat_valid)[0]
+        if len(last_valid_idx) > 0:
+            idx = last_valid_idx[-1]
+            pos = sat_pos[idx]
+            vel = sat_vel[idx]
+            alt = np.linalg.norm(pos) - 6371.0
+            objects.append({
+                "id": protected_sat_norad,
+                "type": "satellite",
+                "position": pos.tolist(),
+                "velocity": vel.tolist(),
+                "altitude": float(alt)
+            })
+    # Debris
+    for deb in debris_propagations:
+        valid_idx = np.where(deb.valid_mask)[0]
+        if len(valid_idx) > 0:
+            idx = valid_idx[-1]
+            pos = deb.pos_km[idx]
+            vel = deb.vel_km_s[idx]
+            alt = np.linalg.norm(pos) - 6371.0
+            objects.append({
+                "id": deb.norad_id,
+                "type": "debris",
+                "position": pos.tolist(),
+                "velocity": vel.tolist(),
+                "altitude": float(alt)
+            })
+    maneuvers = {
+        "delta_v": output.get("predicted_delta_v_km_s", 0.0),
+        "burn_time": output.get("thrust_command", {}).get("burn_execution_time_s") if output.get("thrust_command") else None,
+        "direction": output.get("thrust_command", {}).get("thrust_vector") if output.get("thrust_command") else None,
+        "fuel_estimate": output.get("thrust_command", {}).get("propellant_used_kg") if output.get("thrust_command") else None
+    }
+    output["objects"] = objects
+    output["collisions"] = conjunction_rows
+    output["maneuvers"] = maneuvers
+
     _log_structured(
         {
             "pipeline": "real",
@@ -593,9 +636,34 @@ def run_autonomous_cycle(fetch_live_data: bool = False, benchmark_mode: bool = F
         }
     )
 
+    def make_json_safe(obj):
+        if isinstance(obj, dict):
+            return {k: make_json_safe(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [make_json_safe(i) for i in obj]
+        elif isinstance(obj, tuple):
+            return [make_json_safe(i) for i in obj]
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, np.generic):
+            return obj.item()
+        elif hasattr(obj, "__dict__"):
+            return make_json_safe(vars(obj))
+        else:
+            return obj
+
+    safe_output = make_json_safe(output)
     with decision_json.open("w", encoding="utf-8") as f_decision:
-        json.dump(output, f_decision, indent=2)
-    return output
+        json.dump(safe_output, f_decision, indent=2)
+    return {
+        "analysis": {
+            "collision_probability": pc,
+            "miss_distance_km": refined_miss_km,
+            "delta_v_km_s": selected_dv if should_burn else 0.0,
+            "runtime_seconds": runtime_seconds,
+            "tca_time": str(highest_risk["refined_tca_utc"])
+        }
+    }
 
 
 if __name__ == "__main__":
